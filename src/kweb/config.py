@@ -34,6 +34,7 @@ class Config(pydantic.BaseSettings):  # type: ignore[valid-type, misc]
     meta_splitter: str = ":"
     editable: bool = False
     add_missing_layers: bool = True
+    layer_props: Path | None = None  # Add this line
     max_rdb_limit: int = 100
     """Maximum rdb errors the client can request."""
 

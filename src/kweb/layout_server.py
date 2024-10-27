@@ -7,7 +7,7 @@ from collections.abc import Callable
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, TypeAlias, Literal
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, parse_qsl
 
 # NOTE: import db to enable stream format readers
 import klayout.db as db
@@ -113,47 +113,42 @@ class ItemMarkerGroup:
 
 
 class LayoutViewServerEndpoint(WebSocketEndpoint):
-    editable: bool = False
-    add_missing_layers: bool = True
-    meta_splitter: str
-    root: Path
-    max_rdb_limit: int = 100
-
-    def __init_subclass__(
-        cls,
+    def __init__(
+        self,
+        scope: dict,
+        receive: Any,
+        send: Any,
         root: Path,
         editable: bool = False,
         add_missing_layers: bool = True,
-        meta_splitter: str = ":",
-        max_rdb_limit: int = 100,
-        **kwargs: Any,
+        meta_splitter: str = "|",
+        layer_props: Path | None = None,
+        max_rdb_limit: int = 100
     ):
-        super().__init_subclass__(**kwargs)
-        cls.editable = editable
-        cls.add_missing_layers = add_missing_layers
-        cls.meta_splitter = meta_splitter
-        cls.root = root
-        cls.max_rdb_limit = max_rdb_limit
-
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
-
-        params = parse_qs(self.scope["query_string"].decode("utf-8"))
-        self.url = str(self.root / params["file"][0])
-        self.layer_props = params.get("layer_props", [None])[0]
-        if self.layer_props:
-            self.layer_props = str(self.root / self.layer_props)
-        self.rdb_file = params.get("rdb", [None])[0]
-        if self.rdb_file:
-            self.rdb_file = str(self.root / self.rdb_file)
-        self.initial_cell = params.get("cell", [None])[0]
-        self.db = rdb.ReportDatabase("kwebrdb")
-        self.rdb_items: dict[int, rdb.RdbItem] = {}
-        self.cell_map: dict[int, db.Cell | None] = {}
-        self.rdb_layer: int = -1  # place holder until initialization
+        super().__init__(scope, receive, send)
+        self.root = root
+        self.editable = editable
+        self.add_missing_layers = add_missing_layers
+        self.meta_splitter = meta_splitter
+        self.layer_props = layer_props
+        self.max_rdb_limit = max_rdb_limit
+        
+        # Initialize all required attributes
+        self.initial_cell = None
+        self.layout_view = None
+        self.marker_group = None
+        self.marker_categories = None
+        self.rdb_layer = None
+        self.url = None
+        self.rdb_file = None  # Add this line
+        self.rdb_cell = None  # Might need this too
+        self.rdb_view = None  # And this
+        self.rdb_items = None  # And this
+        print(f"Initialized endpoint with layer_props: {self.layer_props}")
 
     async def on_connect(self, websocket: WebSocket) -> None:
-        await websocket.accept()
+        print(f"Connecting with layer_props: {self.layer_props}")
+        await super().on_connect(websocket)
         await self.connection(websocket)
 
     async def on_receive(self, websocket: WebSocket, data: str) -> None:
@@ -233,6 +228,7 @@ class LayoutViewServerEndpoint(WebSocketEndpoint):
         end_iter: lay.LayerPropertiesIterator | None = None,
     ) -> list[dict[str, object]]:
         if iter is None:
+            self.layout_view.set_config('background-color', '#ffffff')
             iter = self.layout_view.begin_layers()
         js = []
         # for layer in self.layout_view.each_layer():
@@ -415,21 +411,32 @@ class LayoutViewServerEndpoint(WebSocketEndpoint):
         self.layout_view.zoom_box(dbbox)
 
     async def connection(self, websocket: WebSocket, path: str | None = None) -> None:
+        print(f"Starting connection with layer_props: {self.layer_props}")
+        
+        # Get the file parameter from the query string
+        params = dict(parse_qsl(websocket.scope.get("query_string", b"").decode()))
+        self.url = str(self.root / params.get("file", ""))
+        
         self.layout_view = lay.LayoutView(self.editable)
         self.marker_group = ItemMarkerGroup()
-        self.marker_categories: dict[int, MarkerCategory] = defaultdict(MarkerCategory)
+        self.marker_categories = defaultdict(MarkerCategory)
         self.layout_view.load_layout(self.url)
         self.rdb_layer = self.layout_view.active_cellview().layout().layer("RDB View")
         self.layout_view.add_missing_layers()
+
+
         if self.layer_props and Path(self.layer_props).is_file():
+            print(f"Found layer props file at: {self.layer_props}")
             try:
-                self.layout_view.load_layer_props(self.layer_props)
+                self.layout_view.load_layer_props(str(self.layer_props))
+                print("Successfully loaded layer properties")
             except RuntimeError as e:
+                print(f"Error loading layer properties: {e}")
                 await websocket.send_text(
                     json.dumps(
                         {
                             "msg": "error",
-                            "details": "Error loading layper properties file (.lyp)\nError:\n"
+                            "details": "Error loading layer properties file (.lyp)\nError:\n"
                             + str(e),
                         }
                     )
@@ -476,7 +483,7 @@ class LayoutViewServerEndpoint(WebSocketEndpoint):
                 websocket=websocket,
                 cell_index=0,
             )
-
+        self.layout_view.set_config('background-color', '#ffffff')
         if loaded_rdb:
             await websocket.send_text(
                 json.dumps(
@@ -609,6 +616,7 @@ class LayoutViewServerEndpoint(WebSocketEndpoint):
 
             case "initialize":
                 self.layout_view.resize(js["width"], js["height"])
+
                 await websocket.send_text(json.dumps({"msg": "initialized"}))
             case "mode_select":
                 self.layout_view.switch_mode(js["mode"])
@@ -711,3 +719,13 @@ class LayoutViewServerEndpoint(WebSocketEndpoint):
 
 def meta_json_serializer(obj: object) -> str:
     return str(obj)
+
+
+
+
+
+
+
+
+
+
